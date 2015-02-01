@@ -25,6 +25,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <limits.h>
+#include <fcntl.h>
 
 static int recurse(const char *path, mode_t mode, int (*fn)(const char *,mode_t, int)) {
     struct stat st;
@@ -54,14 +55,36 @@ int dlp_chmod(const char *path, mode_t mode, int recursive) {
     fprintf(stderr, "error: dlp_chmod not implemented on Win32 (%s)\n", path);
     return -1;
 #else
-    struct stat st;
+    int fd;
+    struct stat lstat_info;
+    struct stat fstat_info;
 
-    if (stat (path, &st) == -1)
+    if (lstat (path, &lstat_info) == -1)
         return -1;
 
-    if (chmod (path, mode) == -1) {
+    fd = open(path, O_WRONLY, S_IRWXU);
+    if(fd == -1)
+        return -1;
+
+    if (fstat (fd, &fstat_info) == -1)
+    {
+        close(fd);
         return -1;
     }
+
+    // this complex check is required because of 'chmod' security issue.
+    // otherwise hacker can change other file's permission by using race condition and symbolic link.
+    if(lstat_info.st_mode == fstat_info.st_mode &&
+       lstat_info.st_ino == fstat_info.st_ino &&
+       lstat_info.st_dev == fstat_info.st_dev){
+        if (fchmod (fd, mode) == -1) {
+            close(fd);
+            return -1;
+        }
+    }
+
+    close(fd);
+
     if (recursive) {
         return recurse(path, mode, dlp_chmod);
     }

@@ -1,9 +1,9 @@
 /*
  *  debug-launchpad
  *
- * Copyright (c) 2000 - 2011 Samsung Electronics Co., Ltd. All rights reserved.
+ * Copyright (c) 2000 - 2014 Samsung Electronics Co., Ltd. All rights reserved.
  *
- * Contact: Jungmin Cho <chivalry.cho@samsung.com>, Gwangho Hwang <gwang.hwang@samsung.com>
+ * Contact: MooChang Kim <moochang.kim@samsung.com>
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -66,7 +66,6 @@
 #define SQLITE_FLUSH_MAX	(1048576)	/* (1024*1024) */
 #define AUL_POLL_CNT		15
 #define AUL_PR_NAME			16
-
 #define PATH_TMP "/tmp"
 #define PATH_DATA "/data"
 
@@ -86,13 +85,6 @@
 #define PATH_DA_SO	"/usr/lib/da_probe_tizen.so"
 #define PATH_NATIVE_APP	"/opt/apps/"
 
-#define OPT_VALGRIND_LOGFILE		"--log-file="
-#define OPT_VALGRIND_LOGFILE_FIXED	"--log-file=/tmp/valgrind_result.txt"
-#define PATH_VALGRIND_LOGFILE		"/tmp/valgrind_result.txt"
-#define OPT_VALGRIND_XMLFILE		"--xml-file="
-#define OPT_VALGRIND_XMLFILE_FIXED	"--xml-file=/tmp/valgrind_result.xml"
-#define PATH_VALGRIND_XMLFILE		"/tmp/valgrind_result.xml"
-
 #if (ARCH==arm)
 #define PATH_MEMCHECK	"/opt/home/developer/sdk_tools/valgrind/usr/lib/valgrind/memcheck-arm-linux"
 #elif (ARCH==x86)
@@ -102,7 +94,7 @@
 #define POLL_VALGRIND_LOGFILE		0x00000001
 #define POLL_VALGRIND_XMLFILE		0x00000002
 
-#define CAPABILITY_SET_ORIGINAL		0
+#define CAPABILITY_GET_ORIGINAL		0
 #define CAPABILITY_SET_INHERITABLE	1
 
 static int need_to_set_inh_cap_after_fork = 0;
@@ -110,6 +102,7 @@ static char *launchpad_cmdline;
 static int initialized = 0;
 
 static int poll_outputfile = 0;
+static int is_gdbserver_launched;
 
 void __set_env(app_info_from_db * menu_info, bundle * kb);
 int __prepare_exec(const char *pkg_name,
@@ -375,7 +368,12 @@ char **__create_argc_argv(bundle * kb, int *margc, const char *app_path)
 			char buf[MAX_LOCAL_BUFSZ];
 			if (argv[0]) free(argv[0]);
 			snprintf(buf,MAX_LOCAL_BUFSZ,"%s.exe",app_path);
-			argv[0] = strdup(buf);
+			// this code is added because core app don't have '.exe' excutable
+			// if '.exe' not exist then use app_path
+			if(access(buf, F_OK) != 0)
+				argv[0] = strdup(app_path);
+			else
+				argv[0] = strdup(buf);
 			new_argv = __add_arg(kb, argv, &argc, DLP_K_DEBUG_ARG);
 			new_argv[0] = strdup(PATH_GDBSERVER);
 			argv = new_argv;
@@ -784,9 +782,9 @@ int apply_smack_rules(const char* subject, const char* object
 	}
 
 	if (smack_accesses_apply(rules)) {
-		smack_accesses_free(rules);
+		// smack_accesses_free(rules);
 		_E("smack_accesses_apply fail");
-		return -1;
+		// return -1;
 	}
 
 	smack_accesses_free(rules);
@@ -816,15 +814,14 @@ int __prepare_valgrind_outputfile(bundle *kb)
 		if(str_array[i] == NULL) break;
 		/* valgrind log file option */
 		if (strncmp(str_array[i], OPT_VALGRIND_LOGFILE
-			, strlen(OPT_VALGRIND_LOGFILE)) == 0)
+			, sizeof(OPT_VALGRIND_LOGFILE)-1) == 0)
 		{
-			if(strncmp(str_array[i], OPT_VALGRIND_LOGFILE_FIXED
-				, strlen(str_array[i])))
+			if(strcmp(str_array[i], OPT_VALGRIND_LOGFILE_FIXED))
 			{
 				_E("wrong valgrind option(%s). It should be %s"
 					, str_array[i]
 					, OPT_VALGRIND_LOGFILE_FIXED);
-				return 1;
+				return -1;
 			}else{
 				poll_outputfile |= POLL_VALGRIND_LOGFILE;
 				if(remove(PATH_VALGRIND_LOGFILE)){
@@ -835,17 +832,33 @@ int __prepare_valgrind_outputfile(bundle *kb)
 		}
 		/* valgrind xml file option */
 		else if (strncmp(str_array[i], OPT_VALGRIND_XMLFILE
-			, strlen(OPT_VALGRIND_XMLFILE)) == 0)
+			, sizeof(OPT_VALGRIND_XMLFILE)-1) == 0)
 		{
-			if(strncmp(str_array[i], OPT_VALGRIND_XMLFILE_FIXED
-				, strlen(str_array[i])))
+			if(strcmp(str_array[i], OPT_VALGRIND_XMLFILE_FIXED))
 			{
 				_E("wrong valgrind option(%s). It should be %s"
 					, str_array[i]
 					, OPT_VALGRIND_XMLFILE_FIXED);
-				return 1;
+				return -1;
 			}else{
 				poll_outputfile |= POLL_VALGRIND_XMLFILE;
+				if(remove(PATH_VALGRIND_XMLFILE)){
+					_D("cannot remove %s"
+						, PATH_VALGRIND_XMLFILE);
+				}
+			}
+		}
+		/* valgrind massif file option */
+		else if (strncmp(str_array[i], OPT_VALGRIND_MASSIFFILE
+			, sizeof(OPT_VALGRIND_MASSIFFILE)-1) == 0)
+		{
+			if(strcmp(str_array[i], OPT_VALGRIND_MASSIFFILE_FIXED))
+			{
+				_E("wrong valgrind option(%s). It should be %s"
+					, str_array[i]
+					, OPT_VALGRIND_MASSIFFILE_FIXED);
+				return -1;
+			}else{
 				if(remove(PATH_VALGRIND_XMLFILE)){
 					_D("cannot remove %s"
 						, PATH_VALGRIND_XMLFILE);
@@ -861,15 +874,12 @@ extern int capset(cap_user_header_t hdrp, const cap_user_data_t datap);
 int __adjust_process_capability(int sv)
 {
 	static struct __user_cap_header_struct h;
-	static struct __user_cap_data_struct ori_d[_LINUX_CAPABILITY_U32S_2];
 	static struct __user_cap_data_struct inh_d[_LINUX_CAPABILITY_U32S_2];
-	static int isinit = 0;
 
-	if(isinit==0) {
+	if(sv == CAPABILITY_GET_ORIGINAL) {
 		h.version = _LINUX_CAPABILITY_VERSION_2;
 		h.pid = getpid();
 
-		capget(&h, ori_d);
 		capget(&h, inh_d);
 
 		inh_d[CAP_TO_INDEX(CAP_NET_RAW)].inheritable |=
@@ -877,24 +887,10 @@ int __adjust_process_capability(int sv)
 		inh_d[CAP_TO_INDEX(CAP_SYS_CHROOT)].inheritable |=
 			CAP_TO_MASK(CAP_SYS_CHROOT);
 
-		isinit++;
-
-		if(sv == CAPABILITY_SET_ORIGINAL) return 0;
+		return 0;
 	}
-
-	if(isinit==0) {
-		_E("__adjust_process_capability init failed");
-		return -1;
-	}
-
-	if(sv == CAPABILITY_SET_ORIGINAL) {
-		h.pid = getpid();
-		if (capset(&h, ori_d) < 0) {
-			_E("Capability setting error");
-			return -1;
-		}
-	}
-	else if (sv == CAPABILITY_SET_INHERITABLE) {
+	
+	if (sv == CAPABILITY_SET_INHERITABLE) {
 		h.pid = getpid();
 		if (capset(&h, inh_d) < 0) {
 			_E("Capability setting error");
@@ -921,8 +917,8 @@ int __prepare_fork(bundle *kb, char *appid)
 	int len = 0;
 	int i;
 	pkgmgrinfo_pkginfo_h handle;
-	bool bPreloaded;
-	char *storeclientid;
+	bool bPreloaded = false;
+	char *storeclientid = NULL;
 
 	need_to_set_inh_cap_after_fork=0;
 	poll_outputfile = 0;
@@ -937,16 +933,22 @@ int __prepare_fork(bundle *kb, char *appid)
 	}
 	if(str_array == NULL) return 0;
 
+	is_gdbserver_launched = 0;
+	gdbserver_pid = -1;
+	gdbserver_app_pid = -1;
+
 	for (i = 0; i < len; i++) {
 		if(str_array[i] == NULL) break;
 		/* gdbserver */
 		if (strncmp(str_array[i], SDK_DEBUG, strlen(str_array[i])) == 0)
 		{
-			// because of security issue, prevent debugging(ptrace) for preloaded app and downloaded app
+			// because of security issue, prevent debugging(ptrace) for preloaded app and downloaed app
 			if(pkgmgrinfo_pkginfo_get_pkginfo(appid, &handle) == PMINFO_R_OK)
 			{
-				pkgmgrinfo_pkginfo_is_preload(handle, &bPreloaded);
-				pkgmgrinfo_pkginfo_get_storeclientid(handle, &storeclientid);
+				if(pkgmgrinfo_pkginfo_is_preload(handle, &bPreloaded) != PMINFO_R_OK)
+					return -1;
+				if(pkgmgrinfo_pkginfo_get_storeclientid(handle, &storeclientid) != PMINFO_R_OK)
+					return -1;
 				if(bPreloaded || (storeclientid[0] != '\0'))
 				{
 					_E("debugging is not allowed");
@@ -955,8 +957,16 @@ int __prepare_fork(bundle *kb, char *appid)
 			}
 
 			if(apply_smack_rules("sdbd",appid,"w")) {
-				_E("unable to set sdbd rules");
-				return 1;
+				_E("smack_accesses_apply fail");
+				// return -1;
+			}
+
+			// fixed debug-as fail issue (grant permission to use 10.0.2.2, 10.0.2.16)
+			if(apply_smack_rules(appid, "system::debugging_network", "rw")) {
+				_E("smack_accesses_apply fail");
+			}
+			if(apply_smack_rules("system::debugging_network", appid, "w")) {
+				_E("smack_accesses_apply fail");
 			}
 
 			// FIXME: set gdbfolder to 755 also
@@ -969,39 +979,20 @@ int __prepare_fork(bundle *kb, char *appid)
 			}
 			__adjust_file_capability(PATH_GDBSERVER);
 			need_to_set_inh_cap_after_fork++;
+			is_gdbserver_launched++;
 		}
 		/* valgrind */
 		else if (strncmp(str_array[i], SDK_VALGRIND
 			, strlen(str_array[i])) == 0)
 		{
-			if (__prepare_valgrind_outputfile(kb)) return 1;
+			if (__prepare_valgrind_outputfile(kb) == -1)
+				return -1;
 			__adjust_file_capability(PATH_MEMCHECK);
 		}
 	}
 	return 0;
 }
 
-/* chmod and chsmack to read file without root privilege */
-void __chmod_chsmack_toread(const char * path)
-{
-	/* chmod */
-	if(dlp_chmod(path, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH, 0))
-	{
-		_E("unable to set 644 to %s", path);
-	}else{
-		_D("set 644 to %s", path);
-	}
-
-	/* chsmack */
-	if(smack_setlabel(path, "*", SMACK_LABEL_ACCESS))
-	{
-		_E("failed chsmack -a \"*\" %s", path);
-	}else{
-		_D("chsmack -a \"*\" %s", path);
-	}
-
-	return;
-}
 
 /* waiting for creating outputfile by child process */
 void __waiting_outputfile()
@@ -1134,7 +1125,7 @@ void __launchpad_main_loop(int main_fd)
 
 	PERF("get package information & modify bundle done");
 
-	if(__prepare_fork(kb,appid)) goto end;
+	if(__prepare_fork(kb,appid) == -1) goto end;
 
 	pid = fork();
 	if (pid == 0) {
@@ -1173,6 +1164,21 @@ void __launchpad_main_loop(int main_fd)
 		__real_launch(app_path, kb);
 
 		exit(-1);
+	}
+
+	if(is_gdbserver_launched) {
+		char buf[MAX_LOCAL_BUFSZ];
+
+		usleep(100 * 1000);     /* 100ms sleep */
+		snprintf(buf, MAX_LOCAL_BUFSZ, "%s.exe", app_path);
+		gdbserver_app_pid = __proc_iter_cmdline(NULL, buf);
+
+		if(gdbserver_app_pid == -1) {
+			_E("faild to get app pid");
+		} else {
+			gdbserver_pid = pid;
+			pid = gdbserver_app_pid;
+		}
 	}
 
 	_D("==> real launch pid : %d %s\n", pid, app_path);
@@ -1264,7 +1270,7 @@ int main(int argc, char **argv)
 	struct pollfd pfds[POLLFD_MAX];
 	int i;
 
-	__adjust_process_capability(CAPABILITY_SET_ORIGINAL);
+	__adjust_process_capability(CAPABILITY_GET_ORIGINAL);
 
 	/* init without concerning X & EFL*/
 	main_fd = __launchpad_pre_init(argc, argv);

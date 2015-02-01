@@ -21,11 +21,14 @@
 
 
 #include <pthread.h>
+#include <sys/smack.h>
 #include "app_signal.h"
 
 static struct sigaction old_sigchild;
 static DBusConnection *bus = NULL;
 sigset_t oldmask;
+static int gdbserver_pid;
+static int gdbserver_app_pid;
 
 static inline void __socket_garbage_collector()
 {
@@ -114,6 +117,28 @@ static inline int __send_app_launch_signal(int launch_pid)
 	return 0;
 }
 
+/* chmod and chsmack to read file without root privilege */
+static void __chmod_chsmack_toread(const char * path)
+{
+	/* chmod */
+	if(dlp_chmod(path, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH, 0))
+	{
+		_E("unable to set 644 to %s", path);
+	}else{
+		_D("set 644 to %s", path);
+	}
+
+	/* chsmack */
+	if(smack_setlabel(path, "*", SMACK_LABEL_ACCESS))
+	{
+		_E("failed chsmack -a \"*\" %s", path);
+	}else{
+		_D("chsmack -a \"*\" %s", path);
+	}
+
+	return;
+}
+
 static int __sigchild_action(void *data)
 {
 	pid_t dead_pid;
@@ -122,6 +147,16 @@ static int __sigchild_action(void *data)
 	dead_pid = (pid_t) data;
 	if (dead_pid <= 0)
 		goto end;
+
+       /* send app pid instead of gdbserver pid */
+       if(dead_pid == gdbserver_pid)
+               dead_pid = gdbserver_app_pid;
+
+	/* valgrind xml file */
+	if(access(PATH_VALGRIND_XMLFILE,F_OK)==0)
+	{
+		__chmod_chsmack_toread(PATH_VALGRIND_XMLFILE);
+	}
 
 	__send_app_dead_signal(dead_pid);
 
