@@ -1,9 +1,9 @@
 /*
  *  debug-launchpad
  *
- * Copyright (c) 2000 - 2011 Samsung Electronics Co., Ltd. All rights reserved.
+ * Copyright (c) 2000 - 2014 Samsung Electronics Co., Ltd. All rights reserved.
  *
- * Contact: Jungmin Cho <chivalry.cho@samsung.com>, Gwangho Hwang <gwang.hwang@samsung.com>
+ * Contact: MooChang Kim <moochang.kim@samsung.com>
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,6 +50,7 @@
 #include "perf.h"
 #include "sigchild.h"
 #include "aul_util.h"
+#include "pkgmgr-info.h"
 
 #include "heap_dbg.h"
 
@@ -65,7 +66,6 @@
 #define SQLITE_FLUSH_MAX	(1048576)	/* (1024*1024) */
 #define AUL_POLL_CNT		15
 #define AUL_PR_NAME			16
-#define APPID_LEN	10
 #define PATH_TMP "/tmp"
 #define PATH_DATA "/data"
 
@@ -74,13 +74,11 @@
 #define SDK_DYNAMIC_ANALYSIS "DYNAMIC_ANALYSIS"
 #define SDK_UNIT_TEST "UNIT_TEST"
 #define SDK_VALGRIND "VALGRIND"
-#define SDK_LD_FLAG "LD_FLAG"
 
 /* DLP is short for debug-launchpad */
 #define DLP_K_DEBUG_ARG "__DLP_DEBUG_ARG__"
 #define DLP_K_UNIT_TEST_ARG "__DLP_UNIT_TEST_ARG__"
 #define DLP_K_VALGRIND_ARG "__DLP_VALGRIND_ARG__"
-#define DLP_K_LD_FLAG "__DLP_LD_FLAG__"
 
 #define PATH_GDBSERVER	"/home/developer/sdk_tools/gdbserver/gdbserver"
 #define PATH_VALGRIND	"/home/developer/sdk_tools/valgrind/usr/bin/valgrind"
@@ -96,7 +94,7 @@
 #define POLL_VALGRIND_LOGFILE		0x00000001
 #define POLL_VALGRIND_XMLFILE		0x00000002
 
-#define CAPABILITY_SET_ORIGINAL		0
+#define CAPABILITY_GET_ORIGINAL		0
 #define CAPABILITY_SET_INHERITABLE	1
 
 static int need_to_set_inh_cap_after_fork = 0;
@@ -106,7 +104,6 @@ static int initialized = 0;
 static int poll_outputfile = 0;
 static int is_gdbserver_launched;
 
-void __set_oom();
 void __set_env(app_info_from_db * menu_info, bundle * kb);
 int __prepare_exec(const char *pkg_name,
 			    const char *app_path, app_info_from_db * menu_info,
@@ -130,22 +127,7 @@ extern ail_error_e ail_db_close(void);
 
 
 
-void __set_oom()
-{
-	char buf[MAX_LOCAL_BUFSZ];
-	FILE *fp;
-
-	/* we should reset oomadj value as default because child 
-	inherits from parent oom_adj*/
-	snprintf(buf, MAX_LOCAL_BUFSZ, "/proc/%d/oom_adj", getpid());
-	fp = fopen(buf, "w");
-	if (fp == NULL)
-		return;
-	fprintf(fp, "%d", -16);
-	fclose(fp);
-}
-
-void __set_sdk_env(app_info_from_db* menu_info, char* str, bundle * kb) {
+void __set_sdk_env(app_info_from_db* menu_info, char* str) {
 	char buf_pkgname[MAX_LOCAL_BUFSZ];
 	char buf[MAX_LOCAL_BUFSZ];
 	int ret;
@@ -166,43 +148,9 @@ void __set_sdk_env(app_info_from_db* menu_info, char* str, bundle * kb) {
 		_D("GCOV_PREFIX : %d", ret);
 		ret = setenv("GCOV_PREFIX_STRIP", "0", 1);
 		_D("GCOV_PREFIX_STRIP : %d", ret);
-	}
-	else if (strncmp(str, SDK_DYNAMIC_ANALYSIS, strlen(str)) == 0)
-	{
+	} else if (strncmp(str, SDK_DYNAMIC_ANALYSIS, strlen(str)) == 0) {
 		ret = setenv("LD_PRELOAD", PATH_DA_SO, 1);
 		_D("LD_PRELOAD : %d", ret);
-	}
-	else if (strncmp(str, SDK_LD_FLAG, strlen(str)) == 0)
-	{
-		const char *flag_str = NULL;
-		const char **flag_str_array = NULL;
-		int flag_len;
-		if(bundle_get_type(kb, DLP_K_LD_FLAG) & BUNDLE_TYPE_ARRAY) {
-			flag_str_array = bundle_get_str_array(kb, DLP_K_LD_FLAG, &flag_len);
-		} else {
-			flag_str = bundle_get_val(kb, DLP_K_LD_FLAG);
-			if(flag_str) {
-				flag_str_array = &flag_str;
-				flag_len = 1;
-			}
-		}
-		if(flag_str_array != NULL) {
-			int i;
-			char * f_name;
-			char * f_value;
-			for (i = 0; i < flag_len; i++) {
-				strncpy(buf,flag_str_array[i],MAX_LOCAL_BUFSZ);
-				f_name = strtok(buf,"=");
-				f_value = strtok(NULL,"=");
-				if(f_value) {
-					ret = setenv(f_name,f_value,1);
-					_D("LD_FLAG : %s %s %d",f_name,f_value,ret);
-				} else {
-					_E("LD_FLAG : Wrong option! %s", flag_str_array[i]);
-				}
-			}
-		}
-
 	}
 }
 
@@ -227,17 +175,19 @@ void __set_env(app_info_from_db * menu_info, bundle * kb)
 		if(str_array != NULL) {
 			for (i = 0; i < len; i++) {
 				_D("index : [%d]", i);
-				__set_sdk_env(menu_info, (char *)str_array[i], kb);
+				__set_sdk_env(menu_info, (char *)str_array[i]);
 			}
 		}
 	} else {
 		str = bundle_get_val(kb, AUL_K_SDK);
 		if(str != NULL) {
-			__set_sdk_env(menu_info, (char *)str, kb);
+			__set_sdk_env(menu_info, (char *)str);
 		}
 	}
 	if (menu_info->hwacc != NULL)
 		setenv("HWACC", menu_info->hwacc, 1);
+	if (menu_info->taskmanage != NULL)
+		setenv("TASKMANAGE", menu_info->taskmanage, 1);
 }
 
 int __prepare_exec(const char *pkg_name,
@@ -255,20 +205,13 @@ int __prepare_exec(const char *pkg_name,
 
 	__preexec_run(menu_info->pkg_type, pkg_name, app_path);
 
-	/* SET OOM*/
-	__set_oom();
-
 	/* SET PRIVILEGES*/
-	if(bundle_get_val(kb, AUL_K_PRIVACY_APPID) == NULL) {
-		_D("pkg_name : %s / pkg_type : %s / app_path : %s ", pkg_name
-			, menu_info->pkg_type, app_path);
-		if ((ret = __set_access(pkg_name, menu_info->pkg_type
-			, app_path)) < 0) 
-		{
-			 _D("fail to set privileges - check your package's credential : %d\n"
-				, ret);
-			return -1;
-		}
+	_D("pkg_name : %s / pkg_type : %s / app_path : %s", pkg_name
+		, menu_info->pkg_type, app_path);
+	if ((ret = __set_access(pkg_name, menu_info->pkg_type, app_path)) < 0) {
+		 _D("fail to set privileges - check your package's credential : %d\n"
+			, ret);
+		return -1;
 	}
 	/* SET DUMPABLE - for coredump*/
 	prctl(PR_SET_DUMPABLE, 1);
@@ -425,7 +368,12 @@ char **__create_argc_argv(bundle * kb, int *margc, const char *app_path)
 			char buf[MAX_LOCAL_BUFSZ];
 			if (argv[0]) free(argv[0]);
 			snprintf(buf,MAX_LOCAL_BUFSZ,"%s.exe",app_path);
-			argv[0] = strdup(buf);
+			// this code is added because core app don't have '.exe' excutable
+			// if '.exe' not exist then use app_path
+			if(access(buf, F_OK) != 0)
+				argv[0] = strdup(app_path);
+			else
+				argv[0] = strdup(buf);
 			new_argv = __add_arg(kb, argv, &argc, DLP_K_DEBUG_ARG);
 			new_argv[0] = strdup(PATH_GDBSERVER);
 			argv = new_argv;
@@ -598,6 +546,7 @@ void __modify_bundle(bundle * kb, int caller_pid,
 	bundle_del(kb, AUL_K_EXEC);
 	bundle_del(kb, AUL_K_PACKAGETYPE);
 	bundle_del(kb, AUL_K_HWACC);
+	bundle_del(kb, AUL_K_TASKMANAGE);
 
 	/* Parse app_path to retrieve default bundle*/
 	if (cmd == APP_START || cmd == APP_START_RES || cmd == APP_OPEN
@@ -789,6 +738,7 @@ static app_info_from_db *_get_app_info_from_bundle_by_pkgname(
 		menu_info->original_app_path = strdup(menu_info->app_path);
 	menu_info->pkg_type = strdup(bundle_get_val(kb, AUL_K_PACKAGETYPE));
 	menu_info->hwacc = strdup(bundle_get_val(kb, AUL_K_HWACC));
+	menu_info->taskmanage = strdup(bundle_get_val(kb, AUL_K_TASKMANAGE));
 
 	if (!_get_app_path(menu_info)) {
 		_free_app_info_from_db(menu_info);
@@ -809,23 +759,6 @@ int get_native_appid(const char* app_path, char** appid) {
 		return -1;
 	}
 
-	if (strlen(*appid) != APPID_LEN) {
-		_E("wrong native appid : %s", *appid);
-		return -1;
-	}
-
-	if (strlen(app_path) < sizeof(PATH_NATIVE_APP)+APPID_LEN-1) {
-		_E("wrong native app_path : %s", app_path);
-		return -1;
-	}
-	else if ( strncmp(app_path, PATH_NATIVE_APP, sizeof(PATH_NATIVE_APP)-1)
-		|| strncmp(&app_path[sizeof(PATH_NATIVE_APP)-1]
-		, *appid,APPID_LEN) )
-	{
-		_E("wrong native app_path : %s", app_path);
-		return -1;
-	}
-	
 	_D("get_appid return : %s", *appid);
 	return 0;
 }
@@ -849,9 +782,9 @@ int apply_smack_rules(const char* subject, const char* object
 	}
 
 	if (smack_accesses_apply(rules)) {
-		smack_accesses_free(rules);
+		// smack_accesses_free(rules);
 		_E("smack_accesses_apply fail");
-		return -1;
+		// return -1;
 	}
 
 	smack_accesses_free(rules);
@@ -941,15 +874,12 @@ extern int capset(cap_user_header_t hdrp, const cap_user_data_t datap);
 int __adjust_process_capability(int sv)
 {
 	static struct __user_cap_header_struct h;
-	static struct __user_cap_data_struct ori_d[_LINUX_CAPABILITY_U32S_2];
 	static struct __user_cap_data_struct inh_d[_LINUX_CAPABILITY_U32S_2];
-	static int isinit = 0;
 
-	if(isinit==0) {
+	if(sv == CAPABILITY_GET_ORIGINAL) {
 		h.version = _LINUX_CAPABILITY_VERSION_2;
 		h.pid = getpid();
 
-		capget(&h, ori_d);
 		capget(&h, inh_d);
 
 		inh_d[CAP_TO_INDEX(CAP_NET_RAW)].inheritable |=
@@ -957,24 +887,10 @@ int __adjust_process_capability(int sv)
 		inh_d[CAP_TO_INDEX(CAP_SYS_CHROOT)].inheritable |=
 			CAP_TO_MASK(CAP_SYS_CHROOT);
 
-		isinit++;
-
-		if(sv == CAPABILITY_SET_ORIGINAL) return 0;
+		return 0;
 	}
-
-	if(isinit==0) {
-		_E("__adjust_process_capability init failed");
-		return -1;
-	}
-
-	if(sv == CAPABILITY_SET_ORIGINAL) {
-		h.pid = getpid();
-		if (capset(&h, ori_d) < 0) {
-			_E("Capability setting error");
-			return -1;
-		}
-	}
-	else if (sv == CAPABILITY_SET_INHERITABLE) {
+	
+	if (sv == CAPABILITY_SET_INHERITABLE) {
 		h.pid = getpid();
 		if (capset(&h, inh_d) < 0) {
 			_E("Capability setting error");
@@ -1000,6 +916,9 @@ int __prepare_fork(bundle *kb, char *appid)
 	const char **str_array = NULL;
 	int len = 0;
 	int i;
+	pkgmgrinfo_pkginfo_h handle;
+	bool bPreloaded = false;
+	char *storeclientid = NULL;
 
 	need_to_set_inh_cap_after_fork=0;
 	poll_outputfile = 0;
@@ -1023,9 +942,31 @@ int __prepare_fork(bundle *kb, char *appid)
 		/* gdbserver */
 		if (strncmp(str_array[i], SDK_DEBUG, strlen(str_array[i])) == 0)
 		{
+			// because of security issue, prevent debugging(ptrace) for preloaded app and downloaed app
+			if(pkgmgrinfo_pkginfo_get_pkginfo(appid, &handle) == PMINFO_R_OK)
+			{
+				if(pkgmgrinfo_pkginfo_is_preload(handle, &bPreloaded) != PMINFO_R_OK)
+					return -1;
+				if(pkgmgrinfo_pkginfo_get_storeclientid(handle, &storeclientid) != PMINFO_R_OK)
+					return -1;
+				if(bPreloaded || (storeclientid[0] != '\0'))
+				{
+					_E("debugging is not allowed");
+					return -1;
+				}
+			}
+
 			if(apply_smack_rules("sdbd",appid,"w")) {
-				_E("unable to set sdbd rules");
-				return -1;
+				_E("smack_accesses_apply fail");
+				// return -1;
+			}
+
+			// fixed debug-as fail issue (grant permission to use 10.0.2.2, 10.0.2.16)
+			if(apply_smack_rules(appid, "system::debugging_network", "rw")) {
+				_E("smack_accesses_apply fail");
+			}
+			if(apply_smack_rules("system::debugging_network", appid, "w")) {
+				_E("smack_accesses_apply fail");
 			}
 
 			// FIXME: set gdbfolder to 755 also
@@ -1044,7 +985,7 @@ int __prepare_fork(bundle *kb, char *appid)
 		else if (strncmp(str_array[i], SDK_VALGRIND
 			, strlen(str_array[i])) == 0)
 		{
-			if (__prepare_valgrind_outputfile(kb) == -1) 
+			if (__prepare_valgrind_outputfile(kb) == -1)
 				return -1;
 			__adjust_file_capability(PATH_MEMCHECK);
 		}
@@ -1073,7 +1014,7 @@ void __waiting_outputfile()
 			__chmod_chsmack_toread(PATH_VALGRIND_XMLFILE);
 			poll_outputfile &= ~POLL_VALGRIND_XMLFILE;
 		}
-
+		
 		if(poll_outputfile) {
 			_D("-- now wait for creating the file --");
 			usleep(50 * 1000);	/* 50ms sleep*/
@@ -1228,7 +1169,7 @@ void __launchpad_main_loop(int main_fd)
 	if(is_gdbserver_launched) {
 		char buf[MAX_LOCAL_BUFSZ];
 
-		usleep(100 * 1000);	/* 100ms sleep */
+		usleep(100 * 1000);     /* 100ms sleep */
 		snprintf(buf, MAX_LOCAL_BUFSZ, "%s.exe", app_path);
 		gdbserver_app_pid = __proc_iter_cmdline(NULL, buf);
 
@@ -1329,7 +1270,7 @@ int main(int argc, char **argv)
 	struct pollfd pfds[POLLFD_MAX];
 	int i;
 
-	__adjust_process_capability(CAPABILITY_SET_ORIGINAL);
+	__adjust_process_capability(CAPABILITY_GET_ORIGINAL);
 
 	/* init without concerning X & EFL*/
 	main_fd = __launchpad_pre_init(argc, argv);

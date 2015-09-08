@@ -49,6 +49,7 @@ typedef struct {
 	char *original_app_path;	/* exec */
 	char *pkg_type;		/* x_slp_packagetype */
 	char *hwacc;		/* hwacceleration */
+	char *taskmanage;	/* taskmanage */
 } app_info_from_db;
 
 static inline char *_get_pkgname(app_info_from_db *menu_info)

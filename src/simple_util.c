@@ -146,7 +146,7 @@ char *__proc_get_cmdline_bypid(int pid)
 static inline int __get_pgid_from_stat(int pid)
 {
 	char buf[MAX_LOCAL_BUFSZ];
-	char *str;
+	char *str = NULL;
 	int ret;
 	int i;
 	int count = 0;
@@ -171,7 +171,7 @@ static inline int __get_pgid_from_stat(int pid)
 		}
 	}
 
-	if (count == PROC_STAT_GID_POS)
+	if ((count == PROC_STAT_GID_POS) && (str))
 		pid = atoi(str);
 	else
 		pid = -1;

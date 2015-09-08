@@ -148,9 +148,9 @@ static int __sigchild_action(void *data)
 	if (dead_pid <= 0)
 		goto end;
 
-	/* send app pid instead of gdbserver pid */
-	if(dead_pid == gdbserver_pid)
-		dead_pid = gdbserver_app_pid;
+       /* send app pid instead of gdbserver pid */
+       if(dead_pid == gdbserver_pid)
+               dead_pid = gdbserver_app_pid;
 
 	/* valgrind xml file */
 	if(access(PATH_VALGRIND_XMLFILE,F_OK)==0)

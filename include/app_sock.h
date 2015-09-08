@@ -59,6 +59,7 @@ enum app_cmd {
 #define ELOCALLAUNCH_ID 128
 #define EILLEGALACCESS 127
 #define ETERMINATING 126
+#define EHIDDENFORGUEST 8
 
 typedef struct _app_pkt_t {
 	int cmd;

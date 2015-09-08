@@ -27,7 +27,7 @@
 #define INHOUSE_UID     5000
 static inline int __set_access(const char* pkg_name, const char* pkg_type, const char* app_path)
 {
-	return set_app_privilege(pkg_name, pkg_type, app_path);
+	return perm_app_set_privilege_debug(pkg_name, pkg_type, app_path);
 }
 
 #else
