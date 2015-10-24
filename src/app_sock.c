@@ -28,6 +28,7 @@
 #include <sys/smack.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <time.h>
 
 #include "app_sock.h"
 #include "simple_util.h"
@@ -51,7 +52,6 @@ static inline void __set_sock_option(int fd, int cli)
 int __create_server_sock(int pid)
 {
 	struct sockaddr_un saddr;
-	struct sockaddr_un p_saddr;
 	int fd;
 	mode_t orig_mask;
 
@@ -128,6 +128,7 @@ int __create_server_sock(int pid)
 		int pgid;
 		pgid = getpgid(pid);
 		if (pgid > 1) {
+			struct sockaddr_un p_saddr;
 			snprintf(p_saddr.sun_path, UNIX_PATH_MAX, "%s/%d",
 				 AUL_SOCK_PREFIX, pgid);
 			if (link(saddr.sun_path, p_saddr.sun_path) < 0) {
@@ -148,6 +149,7 @@ int __create_client_sock(int pid)
 	struct sockaddr_un saddr = { 0, };
 	int retry = 1;
 	int ret = -1;
+	struct timespec retry_delay = { 0, 100 * 1000 * 1000 };
 
 	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);	
 	/*  support above version 2.6.27*/
@@ -172,7 +174,7 @@ int __create_client_sock(int pid)
 	if (ret < -1) {
 		_E("maybe peer not launched or peer daed\n");
 		if (retry > 0) {
-			usleep(100 * 1000);
+			nanosleep(&retry_delay, NULL);
 			retry--;
 			goto retry_con;
 		}
@@ -509,7 +511,10 @@ retry_recv:
 		} else if (errno == EINTR) {
 			goto retry_recv;
 		} else {
-			_E("recv error %s\n", strerror(errno));
+			char err_buf[100] = { 0, };
+			strerror_r(errno, err_buf, sizeof(err_buf));
+			_E("recv error %s\n", err_buf);
+
 			free(pkt);
 			close(fd);
 			return NULL;

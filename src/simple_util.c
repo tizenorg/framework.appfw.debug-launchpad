@@ -86,7 +86,8 @@ int __proc_iter_cmdline(
 		    void *priv)
 {
 	DIR *dp;
-	struct dirent *dentry;
+	struct dirent dentry;
+	struct dirent *result = NULL;
 	int pid;
 	int ret;
 	char buf[MAX_LOCAL_BUFSZ];
@@ -99,11 +100,11 @@ int __proc_iter_cmdline(
 	if (iterfunc == NULL)
 		iterfunc = __find_pid_by_cmdline;
 
-	while ((dentry = readdir(dp)) != NULL) {
-		if (!isdigit(dentry->d_name[0]))
+	while (readdir_r(dp, &dentry, &result) == 0 && result != NULL) {
+		if (!isdigit(dentry.d_name[0]))
 			continue;
 
-		snprintf(buf, sizeof(buf), "/proc/%s/cmdline", dentry->d_name);
+		snprintf(buf, sizeof(buf), "/proc/%s/cmdline", dentry.d_name);
 		ret = __read_proc(buf, buf, sizeof(buf));
 		if (ret <= 0)
 			continue;
@@ -111,10 +112,10 @@ int __proc_iter_cmdline(
 		/* support app launched by shell script*/
 		if (strncmp(buf, BINSH_NAME, BINSH_SIZE) == 0)
 			pid =
-			    iterfunc(dentry->d_name, &buf[BINSH_SIZE + 1],
+			    iterfunc(dentry.d_name, &buf[BINSH_SIZE + 1],
 				     priv);
 		else
-			pid = iterfunc(dentry->d_name, buf, priv);
+			pid = iterfunc(dentry.d_name, buf, priv);
 
 		if (pid > 0) {
 			closedir(dp);
@@ -128,7 +129,7 @@ int __proc_iter_cmdline(
 
 char *__proc_get_cmdline_bypid(int pid)
 {
-	char buf[MAX_LOCAL_BUFSZ];
+	char buf[MAX_LOCAL_BUFSZ] = {0};
 	int ret;
 
 	snprintf(buf, sizeof(buf), "/proc/%d/cmdline", pid);
@@ -145,7 +146,7 @@ char *__proc_get_cmdline_bypid(int pid)
 
 static inline int __get_pgid_from_stat(int pid)
 {
-	char buf[MAX_LOCAL_BUFSZ];
+	char buf[MAX_LOCAL_BUFSZ] = {0};
 	char *str = NULL;
 	int ret;
 	int i;
@@ -171,7 +172,7 @@ static inline int __get_pgid_from_stat(int pid)
 		}
 	}
 
-	if ((count == PROC_STAT_GID_POS) && (str))
+	if (count == PROC_STAT_GID_POS && str)
 		pid = atoi(str);
 	else
 		pid = -1;
@@ -183,7 +184,8 @@ int __proc_iter_pgid(int pgid, int (*iterfunc) (int pid, void *priv),
 		     void *priv)
 {
 	DIR *dp;
-	struct dirent *dentry;
+	struct dirent dentry;
+	struct dirent *result = NULL;
 	int _pgid;
 	int ret = -1;
 
@@ -192,13 +194,13 @@ int __proc_iter_pgid(int pgid, int (*iterfunc) (int pid, void *priv),
 		return -1;
 	}
 
-	while ((dentry = readdir(dp)) != NULL) {
-		if (!isdigit(dentry->d_name[0]))
+	while (readdir_r(dp, &dentry, &result) == 0 && result != NULL) {
+		if (!isdigit(dentry.d_name[0]))
 			continue;
 
-		_pgid = __get_pgid_from_stat(atoi(dentry->d_name));
+		_pgid = __get_pgid_from_stat(atoi(dentry.d_name));
 		if (pgid == _pgid) {
-			ret = iterfunc(atoi(dentry->d_name), priv);
+			ret = iterfunc(atoi(dentry.d_name), priv);
 			if (ret >= 0)
 				break;
 		}

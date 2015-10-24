@@ -54,7 +54,7 @@ enum app_cmd {
 };
 
 #define AUL_SOCK_PREFIX "/tmp/alaunch"
-#define AUL_SOCK_MAXBUFF 65535
+#define AUL_SOCK_MAXBUFF 131071
 #define DEBUG_LAUNCHPAD_PID -4
 #define ELOCALLAUNCH_ID 128
 #define EILLEGALACCESS 127

@@ -36,6 +36,7 @@
 #include <poll.h>
 #include <sys/prctl.h>
 #include <malloc.h>
+#include <bundle_internal.h>
 
 #include "app_sock.h"
 #include "aul.h"
@@ -51,6 +52,7 @@
 #include "sigchild.h"
 #include "aul_util.h"
 #include "pkgmgr-info.h"
+#include "fileutils.h"
 
 #include "heap_dbg.h"
 
@@ -60,6 +62,9 @@
 #include <sys/smack.h>
 #include "fileutils.h"
 #include <sys/capability.h>
+#ifdef _APPFW_FEATURE_SOCKET_ACTIVATION
+#include <systemd/sd-daemon.h>
+#endif
 
 #define _static_ static inline
 #define POLLFD_MAX 1
@@ -79,6 +84,7 @@
 #define DLP_K_DEBUG_ARG "__DLP_DEBUG_ARG__"
 #define DLP_K_UNIT_TEST_ARG "__DLP_UNIT_TEST_ARG__"
 #define DLP_K_VALGRIND_ARG "__DLP_VALGRIND_ARG__"
+#define DLP_K_ATTACH_ARG "__DLP_ATTACH_ARG__"
 
 #define PATH_GDBSERVER	"/home/developer/sdk_tools/gdbserver/gdbserver"
 #define PATH_VALGRIND	"/home/developer/sdk_tools/valgrind/usr/bin/valgrind"
@@ -103,6 +109,7 @@ static int initialized = 0;
 
 static int poll_outputfile = 0;
 static int is_gdbserver_launched;
+static const char *debuggee_appid = NULL;
 
 void __set_env(app_info_from_db * menu_info, bundle * kb);
 int __prepare_exec(const char *pkg_name,
@@ -205,14 +212,17 @@ int __prepare_exec(const char *pkg_name,
 
 	__preexec_run(menu_info->pkg_type, pkg_name, app_path);
 
-	/* SET PRIVILEGES*/
-	_D("pkg_name : %s / pkg_type : %s / app_path : %s", pkg_name
-		, menu_info->pkg_type, app_path);
-	if ((ret = __set_access(pkg_name, menu_info->pkg_type, app_path)) < 0) {
-		 _D("fail to set privileges - check your package's credential : %d\n"
-			, ret);
-		return -1;
+	if (strcmp(bundle_get_val(kb, "__AUL_SDK__"), "ATTACH")) {
+		/* SET PRIVILEGES*/
+		_D("pkg_name : %s / pkg_type : %s / app_path : %s", pkg_name
+				, menu_info->pkg_type, app_path);
+		if ((ret = __set_access(pkg_name, menu_info->pkg_type, app_path)) < 0) {
+			_D("fail to set privileges - check your package's credential : %d\n"
+					, ret);
+			return -1;
+		}
 	}
+
 	/* SET DUMPABLE - for coredump*/
 	prctl(PR_SET_DUMPABLE, 1);
 
@@ -255,9 +265,9 @@ char** __add_arg(bundle * kb, char **argv, int *margc, const char *key)
 	const char **str_array = NULL;
 	int len = 0;
 	int i;
-	char ** new_argv = NULL;
+	char **new_argv = NULL;
 
-	if(bundle_get_type(kb, key) & BUNDLE_TYPE_ARRAY) {
+	if (bundle_get_type(kb, key) & BUNDLE_TYPE_ARRAY) {
 		str_array = bundle_get_str_array(kb, key, &len);
 	} else {
 		str = bundle_get_val(kb, key);
@@ -266,10 +276,10 @@ char** __add_arg(bundle * kb, char **argv, int *margc, const char *key)
 			len = 1;
 		}
 	}
+
 	if(str_array != NULL) {
 		if(strncmp(key, DLP_K_DEBUG_ARG, strlen(key)) == 0
-			|| strncmp(key, DLP_K_VALGRIND_ARG, strlen(key)) == 0)
-		{
+			|| strncmp(key, DLP_K_VALGRIND_ARG, strlen(key)) == 0) {
 			new_argv = (char **) realloc(argv
 				, sizeof(char *) * (*margc+len+2));
 			if(!new_argv) {
@@ -288,6 +298,13 @@ char** __add_arg(bundle * kb, char **argv, int *margc, const char *key)
 			_D("euid : %d", geteuid());
 			_D("gid : %d", getgid());
 			_D("egid : %d", getegid());
+		} else if (strncmp(key, DLP_K_ATTACH_ARG, strlen(key)) == 0) {
+			new_argv = (char **) malloc((len + 2) * sizeof(char *));
+			for (i = 0; i < len; i++) {
+				new_argv[1+i] = strdup(str_array[i]);
+			}
+			*margc = 0;
+			len = len + 1;
 		} else {
 			new_argv = (char **) realloc(argv
 				, sizeof(char *) * (*margc+len+1));
@@ -345,54 +362,60 @@ char **__create_argc_argv(bundle * kb, int *margc, const char *app_path)
 		exit(-1);
 	}
 
-	if(bundle_get_type(kb, AUL_K_SDK) & BUNDLE_TYPE_ARRAY) {
+	if (bundle_get_type(kb, AUL_K_SDK) & BUNDLE_TYPE_ARRAY) {
 		str_array = bundle_get_str_array(kb, AUL_K_SDK, &len);
 	} else {
 		str = bundle_get_val(kb, AUL_K_SDK);
-		if(str) {
+		if (str) {
 			str_array = &str;
 			len = 1;
 		}
 	}
-	if(str_array == NULL) {
+
+	if (str_array == NULL) {
 		*margc = argc;
 		return argv;
 	}
 
 	for (i = 0; i < len; i++) {
-		if(str_array[i] == NULL) break;
+		if (str_array[i] == NULL)
+			break;
+
 		_D("index : [%d]", i);
 		/* gdbserver */
-		if (strncmp(str_array[i], SDK_DEBUG, strlen(str_array[i])) == 0)
-		{
+		if (strncmp(str_array[i], SDK_DEBUG, strlen(str_array[i])) == 0) {
 			char buf[MAX_LOCAL_BUFSZ];
-			if (argv[0]) free(argv[0]);
-			snprintf(buf,MAX_LOCAL_BUFSZ,"%s.exe",app_path);
+			if (argv[0])
+				free(argv[0]);
+			snprintf(buf, MAX_LOCAL_BUFSZ, "%s.exe", app_path);
 			// this code is added because core app don't have '.exe' excutable
 			// if '.exe' not exist then use app_path
-			if(access(buf, F_OK) != 0)
+			if (access(buf, F_OK) != 0)
 				argv[0] = strdup(app_path);
 			else
 				argv[0] = strdup(buf);
+
 			new_argv = __add_arg(kb, argv, &argc, DLP_K_DEBUG_ARG);
 			new_argv[0] = strdup(PATH_GDBSERVER);
 			argv = new_argv;
 		}
 		/* valgrind */
-		else if (strncmp(str_array[i], SDK_VALGRIND
-			, strlen(str_array[i])) == 0)
-		{
+		else if (strncmp(str_array[i], SDK_VALGRIND, strlen(str_array[i])) == 0) {
 			new_argv = __add_arg(kb, argv, &argc
 				, DLP_K_VALGRIND_ARG);
 			new_argv[0] = strdup(PATH_VALGRIND);
 			argv = new_argv;
 		}
 		/* unit test */
-		else if (strncmp(str_array[i], SDK_UNIT_TEST
-			, strlen(str_array[i])) == 0)
-		{
+		else if (strncmp(str_array[i], SDK_UNIT_TEST, strlen(str_array[i])) == 0) {
 			new_argv = __add_arg(kb, argv, &argc
 				, DLP_K_UNIT_TEST_ARG);
+			argv = new_argv;
+		}
+		/* attach */
+		else if (strncmp(str_array[i], "ATTACH", strlen(str_array[i])) == 0) {
+			new_argv = __add_arg(kb, argv, &argc, DLP_K_ATTACH_ARG);
+			new_argv[0] = strdup(PATH_GDBSERVER);
 			argv = new_argv;
 		}
 	}
@@ -748,21 +771,6 @@ static app_info_from_db *_get_app_info_from_bundle_by_pkgname(
 	return menu_info;
 }
 
-/**
- * free after use it
- */
-int get_native_appid(const char* app_path, char** appid) {
-	int rc = smack_lgetlabel(app_path, appid, SMACK_LABEL_ACCESS);
-
-	if (rc != 0 || *appid == NULL) {
-		_E("smack_lgetlabel fail");
-		return -1;
-	}
-
-	_D("get_appid return : %s", *appid);
-	return 0;
-}
-
 int apply_smack_rules(const char* subject, const char* object
 	, const char* access_type)
 {
@@ -889,7 +897,7 @@ int __adjust_process_capability(int sv)
 
 		return 0;
 	}
-	
+
 	if (sv == CAPABILITY_SET_INHERITABLE) {
 		h.pid = getpid();
 		if (capset(&h, inh_d) < 0) {
@@ -910,7 +918,7 @@ int __adjust_file_capability(const char * path)
 	return 0;
 }
 
-int __prepare_fork(bundle *kb, char *appid)
+int __prepare_fork(bundle *kb, const char *appid)
 {
 	const char *str = NULL;
 	const char **str_array = NULL;
@@ -922,71 +930,70 @@ int __prepare_fork(bundle *kb, char *appid)
 
 	need_to_set_inh_cap_after_fork=0;
 	poll_outputfile = 0;
-	if(bundle_get_type(kb, AUL_K_SDK) & BUNDLE_TYPE_ARRAY) {
+	if (bundle_get_type(kb, AUL_K_SDK) & BUNDLE_TYPE_ARRAY) {
 		str_array = bundle_get_str_array(kb, AUL_K_SDK, &len);
 	} else {
 		str = bundle_get_val(kb, AUL_K_SDK);
-		if(str) {
+		if (str) {
 			str_array = &str;
 			len = 1;
 		}
 	}
-	if(str_array == NULL) return 0;
+
+	if (str_array == NULL)
+		return 0;
 
 	is_gdbserver_launched = 0;
 	gdbserver_pid = -1;
 	gdbserver_app_pid = -1;
 
 	for (i = 0; i < len; i++) {
-		if(str_array[i] == NULL) break;
+		if (str_array[i] == NULL)
+			break;
+
 		/* gdbserver */
-		if (strncmp(str_array[i], SDK_DEBUG, strlen(str_array[i])) == 0)
-		{
+		if (strncmp(str_array[i], SDK_DEBUG, strlen(str_array[i])) == 0
+			|| strncmp(str_array[i], "ATTACH", strlen(str_array[i])) == 0) {
 			// because of security issue, prevent debugging(ptrace) for preloaded app and downloaed app
-			if(pkgmgrinfo_pkginfo_get_pkginfo(appid, &handle) == PMINFO_R_OK)
-			{
-				if(pkgmgrinfo_pkginfo_is_preload(handle, &bPreloaded) != PMINFO_R_OK)
+			if (pkgmgrinfo_pkginfo_get_pkginfo(appid, &handle) == PMINFO_R_OK) {
+				if (pkgmgrinfo_pkginfo_is_preload(handle, &bPreloaded) != PMINFO_R_OK)
 					return -1;
-				if(pkgmgrinfo_pkginfo_get_storeclientid(handle, &storeclientid) != PMINFO_R_OK)
+				if (pkgmgrinfo_pkginfo_get_storeclientid(handle, &storeclientid) != PMINFO_R_OK)
 					return -1;
-				if(bPreloaded || (storeclientid[0] != '\0'))
-				{
+				if (bPreloaded || (storeclientid[0] != '\0')) {
 					_E("debugging is not allowed");
 					return -1;
 				}
 			}
 
-			if(apply_smack_rules("sdbd",appid,"w")) {
+			if (apply_smack_rules("sdbd",appid,"w")) {
 				_E("smack_accesses_apply fail");
 				// return -1;
 			}
 
 			// fixed debug-as fail issue (grant permission to use 10.0.2.2, 10.0.2.16)
-			if(apply_smack_rules(appid, "system::debugging_network", "rw")) {
+			if (apply_smack_rules(appid, "system::debugging_network", "rw")) {
 				_E("smack_accesses_apply fail");
 			}
-			if(apply_smack_rules("system::debugging_network", appid, "w")) {
+
+			if (apply_smack_rules("system::debugging_network", appid, "w")) {
 				_E("smack_accesses_apply fail");
 			}
 
 			// FIXME: set gdbfolder to 755 also
-			if(dlp_chmod(PATH_GDBSERVER
-				, S_IRUSR|S_IWUSR|S_IXUSR|S_IRGRP|S_IXGRP
-				|S_IROTH|S_IXOTH
-				, 1))
-			{
+			if (dlp_chmod(PATH_GDBSERVER, S_IRUSR|S_IWUSR|S_IXUSR|S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH, 1)) {
 				_D("unable to set 755 to %s", PATH_GDBSERVER);
 			}
+
 			__adjust_file_capability(PATH_GDBSERVER);
 			need_to_set_inh_cap_after_fork++;
 			is_gdbserver_launched++;
 		}
 		/* valgrind */
-		else if (strncmp(str_array[i], SDK_VALGRIND
-			, strlen(str_array[i])) == 0)
-		{
+		else if (strncmp(str_array[i], SDK_VALGRIND, strlen(str_array[i])) == 0) {
 			if (__prepare_valgrind_outputfile(kb) == -1)
 				return -1;
+
 			__adjust_file_capability(PATH_MEMCHECK);
 		}
 	}
@@ -1000,45 +1007,45 @@ void __waiting_outputfile()
 	int wait_count = 0;
 	while(poll_outputfile && wait_count<10) {
 		/* valgrind log file */
-		if( (poll_outputfile & POLL_VALGRIND_LOGFILE) 
-			&& (access(PATH_VALGRIND_LOGFILE,F_OK)==0) )
-		{
+		if ((poll_outputfile & POLL_VALGRIND_LOGFILE)
+			&& (access(PATH_VALGRIND_LOGFILE,F_OK)==0)) {
 			__chmod_chsmack_toread(PATH_VALGRIND_LOGFILE);
 			poll_outputfile &= ~POLL_VALGRIND_LOGFILE;
 		}
 
 		/* valgrind xml file */
-		if( (poll_outputfile & POLL_VALGRIND_XMLFILE)
-			&& (access(PATH_VALGRIND_XMLFILE,F_OK)==0) )
-		{
+		if ((poll_outputfile & POLL_VALGRIND_XMLFILE)
+			&& (access(PATH_VALGRIND_XMLFILE,F_OK)==0)) {
 			__chmod_chsmack_toread(PATH_VALGRIND_XMLFILE);
 			poll_outputfile &= ~POLL_VALGRIND_XMLFILE;
 		}
-		
-		if(poll_outputfile) {
+
+		if (poll_outputfile) {
 			_D("-- now wait for creating the file --");
 			usleep(50 * 1000);	/* 50ms sleep*/
 			wait_count++;
 		}
 	}
 
-	if(wait_count==10) _E("faild to waiting");
+	if (wait_count==10)
+		_E("faild to waiting");
+
 	return;
 }
 
 int __stdout_stderr_redirection(int defpid)
 {
 	char defpath[UNIX_PATH_MAX];
-	int deffd, result=0; 
+	int deffd, result = 0;
 
 	/* stdout */
 	snprintf(defpath, UNIX_PATH_MAX, "/proc/%d/fd/1", defpid);
 	deffd = open(defpath,O_WRONLY);
-	if(deffd < 0) {
+	if (deffd < 0) {
 		_E("opening caller(%d) stdout failed due to %s"
 			, defpid, strerror(errno));
 		result++;
-	}else{
+	} else {
 		dup2(deffd, 1);
 		close(deffd);
 	}
@@ -1046,11 +1053,11 @@ int __stdout_stderr_redirection(int defpid)
 	/* stderr */
 	snprintf(defpath, UNIX_PATH_MAX, "/proc/%d/fd/2", defpid);
 	deffd = open(defpath,O_WRONLY);
-	if(deffd < 0) {
+	if (deffd < 0) {
 		_E("opening caller(%d) stderr failed due to %s"
 			, defpid,strerror(errno));
 		result+=2;
-	}else{
+	} else {
 		dup2(deffd, 2);
 		close(deffd);
 	}
@@ -1072,7 +1079,6 @@ void __launchpad_main_loop(int main_fd)
 	int is_real_launch = 0;
 
 	char sock_path[UNIX_PATH_MAX] = {0,};
-	char * appid = NULL;
 
 	pkt = __app_recv_raw(main_fd, &clifd, &cr);
 	if (!pkt) {
@@ -1104,28 +1110,19 @@ void __launchpad_main_loop(int main_fd)
 		goto end;
 	}
 	if (app_path[0] != '/') {
-		_D("app_path is not absolute path");
+		_D("app_path is not absolute path", app_path);
 		goto end;
 	}
 
-	{
-		int rc = get_native_appid(app_path,&appid);
-		if(rc!=0 || appid==NULL) {
-			_E("unable to get native appid");
-			if(appid){
-				free(appid);
-				appid = NULL;
-			}
-			goto end;
-		}
-	}
+	debuggee_appid = bundle_get_val(kb, AUL_K_PKGID);
 
 	__modify_bundle(kb, cr.pid, menu_info, pkt->cmd);
 	pkg_name = _get_pkgname(menu_info);
 
 	PERF("get package information & modify bundle done");
 
-	if(__prepare_fork(kb,appid) == -1) goto end;
+	if (__prepare_fork(kb, debuggee_appid) == -1)
+		goto end;
 
 	pid = fork();
 	if (pid == 0) {
@@ -1166,14 +1163,12 @@ void __launchpad_main_loop(int main_fd)
 		exit(-1);
 	}
 
-	if(is_gdbserver_launched) {
-		char buf[MAX_LOCAL_BUFSZ];
-
+	if (is_gdbserver_launched) {
 		usleep(100 * 1000);     /* 100ms sleep */
-		snprintf(buf, MAX_LOCAL_BUFSZ, "%s.exe", app_path);
-		gdbserver_app_pid = __proc_iter_cmdline(NULL, buf);
 
-		if(gdbserver_app_pid == -1) {
+		gdbserver_app_pid = __proc_iter_cmdline(NULL, (void *)app_path);
+
+		if (gdbserver_app_pid == -1) {
 			_E("faild to get app pid");
 		} else {
 			gdbserver_pid = pid;
@@ -1184,7 +1179,7 @@ void __launchpad_main_loop(int main_fd)
 	_D("==> real launch pid : %d %s\n", pid, app_path);
 	is_real_launch = 1;
 
- end:
+end:
 	__send_result_to_caller(clifd, pid);
 
 	if (pid > 0) {
@@ -1203,8 +1198,6 @@ void __launchpad_main_loop(int main_fd)
 		bundle_free(kb);
 	if (pkt != NULL)
 		free(pkt);
-	if (appid != NULL) 
-		free(appid);
 
 	/* Active Flusing for Daemon */
 	if (initialized > AUL_POLL_CNT) {
@@ -1215,6 +1208,26 @@ void __launchpad_main_loop(int main_fd)
 
 	if(poll_outputfile) __waiting_outputfile();
 }
+
+#ifdef _APPFW_FEATURE_SOCKET_ACTIVATION
+_static_ int __create_sock_activation(void)
+{
+	int fd = -1;
+	int listen_fds;
+
+	listen_fds = sd_listen_fds(0);
+	if (listen_fds == 1) {
+		fd = SD_LISTEN_FDS_START + 0;
+		return fd;
+	} else if (listen_fds > 1) {
+		_E("Too many fild descriptors received.");
+		return -1;
+	} else {
+		_E("There is no socket stream");
+		return -1;
+	}
+}
+#endif
 
 int __launchpad_pre_init(int argc, char **argv)
 {
@@ -1231,12 +1244,20 @@ int __launchpad_pre_init(int argc, char **argv)
 	}
 	_D("launchpad cmdline = %s", launchpad_cmdline);
 
+#ifdef _APPFW_FEATURE_SOCKET_ACTIVATION
 	/* create launchpad sock        */
-	fd = __create_server_sock(DEBUG_LAUNCHPAD_PID);
+	fd = __create_sock_activation();
 	if (fd < 0) {
-		_E("server sock error");
-		return -1;
+		_D("Create server socket without socket activation");
+#endif
+		fd = __create_server_sock(DEBUG_LAUNCHPAD_PID);
+		if (fd < 0) {
+			_E("server sock error");
+			return -1;
+		}
+#ifdef _APPFW_FEATURE_SOCKET_ACTIVATION
 	}
+#endif
 
 	__preload_init(argc, argv);
 
@@ -1247,7 +1268,7 @@ int __launchpad_pre_init(int argc, char **argv)
 
 int __launchpad_post_init()
 {
-	/* Setting this as a global variable to keep track 
+	/* Setting this as a global variable to keep track
 	of launchpad poll cnt */
 	/* static int initialized = 0;*/
 
@@ -1287,7 +1308,7 @@ int main(int argc, char **argv)
 		if (poll(pfds, POLLFD_MAX, -1) < 0)
 			continue;
 
-		/* init with concerning X & EFL (because of booting 
+		/* init with concerning X & EFL (because of booting
 		sequence problem)*/
 		if (__launchpad_post_init() < 0) {
 			_E("launcpad post init failed");

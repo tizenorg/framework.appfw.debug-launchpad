@@ -23,6 +23,7 @@
 #include <pthread.h>
 #include <sys/smack.h>
 #include "app_signal.h"
+#include "fileutils.h"
 
 static struct sigaction old_sigchild;
 static DBusConnection *bus = NULL;
