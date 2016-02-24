@@ -27,10 +27,18 @@
 #include <ctype.h>
 #include <dlog.h>
 
-#ifdef LOG_TAG
+#ifdef LAUNCHPAD_LOG
 #undef LOG_TAG
+#define LOG_TAG "AUL_PAD"
+#else
+#undef LOG_TAG
+#define LOG_TAG "AUL"
 #endif
-#define LOG_TAG "DEBUG_LAUNCHPAD"
+#ifdef AMD_LOG
+#undef LOG_TAG
+#define LOG_TAG "AUL_AMD"
+#endif
+
 
 #define MAX_LOCAL_BUFSZ 128
 #define MAX_PID_STR_BUFSZ 20

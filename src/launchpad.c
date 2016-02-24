@@ -67,6 +67,7 @@
 #endif
 
 #define _static_ static inline
+#define POLLFD_MAX 1
 #define SQLITE_FLUSH_MAX	(1048576)	/* (1024*1024) */
 #define AUL_POLL_CNT		15
 #define AUL_PR_NAME			16
@@ -102,19 +103,12 @@
 #define CAPABILITY_GET_ORIGINAL		0
 #define CAPABILITY_SET_INHERITABLE	1
 
-enum {
-	LAUNCHPAD_FD,
-	SIGCHLD_FD,
-	POLLFD_MAX,
-};
-
 static int need_to_set_inh_cap_after_fork = 0;
 static char *launchpad_cmdline;
 static int initialized = 0;
 
 static int poll_outputfile = 0;
 static int is_gdbserver_launched;
-static const char *debuggee_appid = NULL;
 
 void __set_env(app_info_from_db * menu_info, bundle * kb);
 int __prepare_exec(const char *pkg_name,
@@ -776,6 +770,21 @@ static app_info_from_db *_get_app_info_from_bundle_by_pkgname(
 	return menu_info;
 }
 
+/**
+ * free after use it
+ */
+int get_native_appid(const char* app_path, char** appid) {
+	int rc = smack_lgetlabel(app_path, appid, SMACK_LABEL_ACCESS);
+
+	if (rc != 0 || *appid == NULL) {
+		_E("smack_lgetlabel fail");
+		return -1;
+	}
+
+	_D("get_appid return : %s", *appid);
+	return 0;
+}
+
 int apply_smack_rules(const char* subject, const char* object
 	, const char* access_type)
 {
@@ -923,7 +932,7 @@ int __adjust_file_capability(const char * path)
 	return 0;
 }
 
-int __prepare_fork(bundle *kb, const char *appid)
+int __prepare_fork(bundle *kb, char *appid)
 {
 	const char *str = NULL;
 	const char **str_array = NULL;
@@ -1084,6 +1093,7 @@ void __launchpad_main_loop(int main_fd)
 	int is_real_launch = 0;
 
 	char sock_path[UNIX_PATH_MAX] = {0,};
+	char * appid = NULL;
 
 	pkt = __app_recv_raw(main_fd, &clifd, &cr);
 	if (!pkt) {
@@ -1115,19 +1125,28 @@ void __launchpad_main_loop(int main_fd)
 		goto end;
 	}
 	if (app_path[0] != '/') {
-		_D("app_path is not absolute path", app_path);
+		_D("app_path is not absolute path");
 		goto end;
 	}
 
-	debuggee_appid = bundle_get_val(kb, AUL_K_PKGID);
+	{
+		int rc = get_native_appid(app_path,&appid);
+		if(rc!=0 || appid==NULL) {
+			_E("unable to get native appid");
+			if(appid){
+				free(appid);
+				appid = NULL;
+			}
+			goto end;
+		}
+	}
 
 	__modify_bundle(kb, cr.pid, menu_info, pkt->cmd);
 	pkg_name = _get_pkgname(menu_info);
 
 	PERF("get package information & modify bundle done");
 
-	if (__prepare_fork(kb, debuggee_appid) == -1)
-		goto end;
+	if(__prepare_fork(kb,appid) == -1) goto end;
 
 	pid = fork();
 	if (pid == 0) {
@@ -1139,11 +1158,11 @@ void __launchpad_main_loop(int main_fd)
 
 		close(clifd);
 		close(main_fd);
-		__signal_unblock_sigchld();
-		__close_dbus_connection();
+		__signal_unset_sigchld();
+		__signal_fini();
 
-		snprintf(sock_path, UNIX_PATH_MAX, "%s/%d",
-				AUL_SOCK_PREFIX, getpid());
+		snprintf(sock_path, UNIX_PATH_MAX, "%s/%d", AUL_SOCK_PREFIX
+			, getpid());
 		unlink(sock_path);
 
 		if(__stdout_stderr_redirection(__get_caller_pid(kb))) {
@@ -1188,8 +1207,12 @@ end:
 	__send_result_to_caller(clifd, pid);
 
 	if (pid > 0) {
-		if (is_real_launch)
-			__send_app_launch_signal(pid, pkg_name);
+		if (is_real_launch) {
+			/*TODO: retry*/
+			__signal_block_sigchld();
+			__send_app_launch_signal(pid);
+			__signal_unblock_sigchld();
+		}
 	}
 
 	if (menu_info != NULL)
@@ -1199,6 +1222,8 @@ end:
 		bundle_free(kb);
 	if (pkt != NULL)
 		free(pkt);
+	if (appid != NULL) 
+		free(appid);
 
 	/* Active Flusing for Daemon */
 	if (initialized > AUL_POLL_CNT) {
@@ -1260,6 +1285,10 @@ int __launchpad_pre_init(int argc, char **argv)
 	}
 #endif
 
+	__preload_init(argc, argv);
+
+	__preexec_init(argc, argv);
+
 	return fd;
 }
 
@@ -1274,6 +1303,9 @@ int __launchpad_post_init()
 		return 0;
 	}
 
+	if (__signal_set_sigchld() < 0)
+		return -1;
+
 	initialized++;
 
 	return 0;
@@ -1281,11 +1313,9 @@ int __launchpad_post_init()
 
 int main(int argc, char **argv)
 {
-	int main_fd = -1;
-	int sigchld_fd = -1;
+	int main_fd;
 	struct pollfd pfds[POLLFD_MAX];
-	struct signalfd_siginfo siginfo;
-	ssize_t s;
+	int i;
 
 	__adjust_process_capability(CAPABILITY_GET_ORIGINAL);
 
@@ -1296,19 +1326,9 @@ int main(int argc, char **argv)
 		exit(-1);
 	}
 
-	pfds[LAUNCHPAD_FD].fd = main_fd;
-	pfds[LAUNCHPAD_FD].events = POLLIN;
-	pfds[LAUNCHPAD_FD].revents = 0;
-
-	sigchld_fd = __signal_get_sigchld_fd();
-	if (sigchld_fd == -1) {
-		_E("Failed to get sigchld fd");
-		goto error;
-	}
-
-	pfds[SIGCHLD_FD].fd = sigchld_fd;
-	pfds[SIGCHLD_FD].events = POLLIN;
-	pfds[SIGCHLD_FD].revents = 0;
+	pfds[0].fd = main_fd;
+	pfds[0].events = POLLIN;
+	pfds[0].revents = 0;
 
 	while (1) {
 		if (poll(pfds, POLLFD_MAX, -1) < 0)
@@ -1316,35 +1336,16 @@ int main(int argc, char **argv)
 
 		/* init with concerning X & EFL (because of booting
 		sequence problem)*/
-		__launchpad_post_init();
-
-		if ((pfds[SIGCHLD_FD].revents & POLLIN) != 0) {
-			do {
-				s = read(pfds[SIGCHLD_FD].fd, &siginfo, sizeof(struct signalfd_siginfo));
-				if (s == 0)
-					break;
-
-				if (s != sizeof(struct signalfd_siginfo)) {
-					_E("error reading sigchld info");
-					break;
-				}
-
-				__launchpad_process_sigchild(&siginfo);
-			} while (s > 0);
+		if (__launchpad_post_init() < 0) {
+			_E("launcpad post init failed");
+			exit(-1);
 		}
 
-		if ((pfds[LAUNCHPAD_FD].revents & POLLIN) != 0) {
-			_E("pfds[LAUNCHPAD_FD].revents & POLLIN");
-			__launchpad_main_loop(pfds[LAUNCHPAD_FD].fd);
+		for (i = 0; i < POLLFD_MAX; i++) {
+			if ((pfds[i].revents & POLLIN) != 0) {
+				__launchpad_main_loop(pfds[i].fd);
+			}
 		}
 	}
-
-error:
-	if (main_fd != -1)
-		close(main_fd);
-	if (sigchld_fd != -1)
-		close(sigchld_fd);
-
-	return 0;
 }
 

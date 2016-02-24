@@ -70,7 +70,7 @@ int main(int argc, char **argv)
 		exit(-1);
 	}
 
-	if(aul_get_running_app_info_from_proc(iterfunc, argv[1]) != AUL_R_OK)
+	if(aul_app_get_running_app_info(iterfunc, argv[1]) != AUL_R_OK)
 		_E("get running app info failed");
 
 	for (i = 2; i < argc; i++) {

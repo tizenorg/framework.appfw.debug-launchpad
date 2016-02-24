@@ -22,11 +22,10 @@
 
 #include <pthread.h>
 #include <sys/smack.h>
-#include <sys/signalfd.h>
-
 #include "app_signal.h"
 #include "fileutils.h"
 
+static struct sigaction old_sigchild;
 static DBusConnection *bus = NULL;
 sigset_t oldmask;
 static int gdbserver_pid;
@@ -88,7 +87,7 @@ static inline int __send_app_dead_signal(int dead_pid)
 	return 0;
 }
 
-static inline int __send_app_launch_signal(int launch_pid, const char *app_id)
+static inline int __send_app_launch_signal(int launch_pid)
 {
 	DBusMessage *message;
 
@@ -100,9 +99,8 @@ static inline int __send_app_launch_signal(int launch_pid, const char *app_id)
 					  AUL_DBUS_APPLAUNCH_SIGNAL);
 
 	if (dbus_message_append_args(message,
-				DBUS_TYPE_UINT32, &launch_pid,
-				DBUS_TYPE_STRING, &app_id,
-				DBUS_TYPE_INVALID) == FALSE) {
+				     DBUS_TYPE_UINT32, &launch_pid,
+				     DBUS_TYPE_INVALID) == FALSE) {
 		_E("Failed to load data error");
 		return -1;
 	}
@@ -147,17 +145,19 @@ static int __sigchild_action(void *data)
 	pid_t dead_pid;
 	char buf[MAX_LOCAL_BUFSZ];
 
-	dead_pid = (pid_t)data;
+	dead_pid = (pid_t) data;
 	if (dead_pid <= 0)
 		goto end;
 
-	/* send app pid instead of gdbserver pid */
-	if (dead_pid == gdbserver_pid)
-		dead_pid = gdbserver_app_pid;
+       /* send app pid instead of gdbserver pid */
+       if(dead_pid == gdbserver_pid)
+               dead_pid = gdbserver_app_pid;
 
 	/* valgrind xml file */
-	if (access(PATH_VALGRIND_XMLFILE,F_OK) == 0)
+	if(access(PATH_VALGRIND_XMLFILE,F_OK)==0)
+	{
 		__chmod_chsmack_toread(PATH_VALGRIND_XMLFILE);
+	}
 
 	__send_app_dead_signal(dead_pid);
 
@@ -165,18 +165,18 @@ static int __sigchild_action(void *data)
 	unlink(buf);
 
 	__socket_garbage_collector();
-end:
+ end:
 	return 0;
 }
 
-static void __launchpad_process_sigchild(struct signalfd_siginfo *info)
+static void __launchpad_sig_child(int signo, siginfo_t *info, void *data)
 {
 	int status;
 	pid_t child_pid;
 	pid_t child_pgid;
 
-	child_pgid = getpgid(info->ssi_pid);
-	_D("dead_pid = %d pgid = %d", info->ssi_pid, child_pgid);
+	child_pgid = getpgid(info->si_pid);
+	_D("dead_pid = %d pgid = %d", info->si_pid, child_pgid);
 
 	while ((child_pid = waitpid(-1, &status, WNOHANG)) > 0) {
 		if (child_pid == child_pgid)
@@ -210,23 +210,10 @@ static inline int __signal_init(void)
 	return 0;
 }
 
-static inline int __signal_get_sigchld_fd(void)
+static inline int __signal_set_sigchld(void)
 {
-	sigset_t mask;
-	int sfd;
+	struct sigaction act;
 	DBusError error;
-
-	sigemptyset(&mask);
-	sigaddset(&mask, SIGCHLD);
-
-	if (sigprocmask(SIG_BLOCK, &mask, &oldmask) == -1)
-		_E("Failed to sigprocmask");
-
-	sfd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
-	if (sfd == -1) {
-		_E("Failed to create signalfd for SIGCHLD");
-		return -1;
-	}
 
 	dbus_error_init(&error);
 	dbus_threads_init_default();
@@ -234,27 +221,55 @@ static inline int __signal_get_sigchld_fd(void)
 	if (!bus) {
 		_E("Failed to connect to the D-BUS daemon: %s", error.message);
 		dbus_error_free(&error);
-		close(sfd);
 		return -1;
 	}
+	/* TODO: if process stop mechanism is included, 
+	should be modified (SA_NOCLDSTOP)*/
+	act.sa_handler = NULL;
+	act.sa_sigaction = __launchpad_sig_child;
+	sigemptyset(&act.sa_mask);
+	act.sa_flags = SA_NOCLDSTOP | SA_SIGINFO;
 
-	return sfd;
+	if (sigaction(SIGCHLD, &act, &old_sigchild) < 0)
+		return -1;
+
+	return 0;
 }
 
-static inline int __close_dbus_connection(void)
+static inline int __signal_unset_sigchld(void)
 {
+	struct sigaction dummy;
+
 	if (bus == NULL)
 		return 0;
 
 	dbus_connection_close(bus);
-	dbus_connection_unref(bus);
+	if (sigaction(SIGCHLD, &old_sigchild, &dummy) < 0)
+		return -1;
+
+	return 0;
+}
+
+static inline int __signal_block_sigchld(void)
+{
+	sigset_t newmask;
+
+	sigemptyset(&newmask);
+	sigaddset(&newmask, SIGCHLD);
+
+	if (sigprocmask(SIG_BLOCK, &newmask, &oldmask) < 0) {
+		_E("SIG_BLOCK error");
+		return -1;
+	}
+
+	_D("SIGCHLD blocked");
 
 	return 0;
 }
 
 static inline int __signal_unblock_sigchld(void)
 {
-	if (sigprocmask(SIG_SETMASK, &oldmask, NULL) < 0) {
+	if(sigprocmask(SIG_SETMASK, &oldmask, NULL) < 0) {
 		_E("SIG_SETMASK error");
 		return -1;
 	}
