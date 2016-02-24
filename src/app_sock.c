@@ -51,6 +51,7 @@ static inline void __set_sock_option(int fd, int cli)
 int __create_server_sock(int pid)
 {
 	struct sockaddr_un saddr;
+	struct sockaddr_un p_saddr;
 	int fd;
 	mode_t orig_mask;
 
@@ -122,6 +123,22 @@ int __create_server_sock(int pid)
 		return -1;
 	}
 
+	/* support app launched by shell script */
+	/*if (pid != LAUNCHPAD_PID) {
+		int pgid;
+		pgid = getpgid(pid);
+		if (pgid > 1) {
+			snprintf(p_saddr.sun_path, UNIX_PATH_MAX, "%s/%d",
+				 AUL_SOCK_PREFIX, pgid);
+			if (link(saddr.sun_path, p_saddr.sun_path) < 0) {
+				if (errno == EEXIST)
+					_D("pg path - already exists");
+				else
+					_E("pg path - unknown create error");
+			}
+		}
+	}*/
+
 	return fd;
 }
 
@@ -132,7 +149,7 @@ int __create_client_sock(int pid)
 	int retry = 1;
 	int ret = -1;
 
-	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);	
 	/*  support above version 2.6.27*/
 	if (fd < 0) {
 		if (errno == EINVAL) {
