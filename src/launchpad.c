@@ -62,7 +62,6 @@
 #include <sys/capability.h>
 
 #define _static_ static inline
-#define POLLFD_MAX 1
 #define SQLITE_FLUSH_MAX	(1048576)	/* (1024*1024) */
 #define AUL_POLL_CNT		15
 #define AUL_PR_NAME			16
@@ -96,6 +95,12 @@
 
 #define CAPABILITY_GET_ORIGINAL		0
 #define CAPABILITY_SET_INHERITABLE	1
+
+enum {
+	LAUNCHPAD_FD,
+	SIGCHLD_FD,
+	POLLFD_MAX,
+};
 
 static int need_to_set_inh_cap_after_fork = 0;
 static char *launchpad_cmdline;
@@ -1137,16 +1142,15 @@ void __launchpad_main_loop(int main_fd)
 
 		close(clifd);
 		close(main_fd);
-		__signal_unset_sigchld();
-		__signal_fini();
+		__signal_unblock_sigchld();
+		__close_dbus_connection();
 
-		snprintf(sock_path, UNIX_PATH_MAX, "%s/%d", AUL_SOCK_PREFIX
-			, getpid());
+		snprintf(sock_path, UNIX_PATH_MAX, "%s/%d",
+				AUL_SOCK_PREFIX, getpid());
 		unlink(sock_path);
 
-		if(__stdout_stderr_redirection(__get_caller_pid(kb))) {
+		if (__stdout_stderr_redirection(__get_caller_pid(kb)))
 			_E("__stdout_stderr_redirection fail");
-		}
 
 		PERF("prepare exec - first done");
 		_D("lock up test log(no error) : prepare exec - first done");
@@ -1166,7 +1170,7 @@ void __launchpad_main_loop(int main_fd)
 		exit(-1);
 	}
 
-	if(is_gdbserver_launched) {
+	if (is_gdbserver_launched) {
 		char buf[MAX_LOCAL_BUFSZ];
 
 		usleep(100 * 1000);     /* 100ms sleep */
@@ -1188,12 +1192,8 @@ void __launchpad_main_loop(int main_fd)
 	__send_result_to_caller(clifd, pid);
 
 	if (pid > 0) {
-		if (is_real_launch) {
-			/*TODO: retry*/
-			__signal_block_sigchld();
+		if (is_real_launch)
 			__send_app_launch_signal(pid);
-			__signal_unblock_sigchld();
-		}
 	}
 
 	if (menu_info != NULL)
@@ -1203,7 +1203,7 @@ void __launchpad_main_loop(int main_fd)
 		bundle_free(kb);
 	if (pkt != NULL)
 		free(pkt);
-	if (appid != NULL) 
+	if (appid != NULL)
 		free(appid);
 
 	/* Active Flusing for Daemon */
@@ -1213,7 +1213,8 @@ void __launchpad_main_loop(int main_fd)
 		initialized = 1;
 	}
 
-	if(poll_outputfile) __waiting_outputfile();
+	if (poll_outputfile)
+		__waiting_outputfile();
 }
 
 int __launchpad_pre_init(int argc, char **argv)
@@ -1238,10 +1239,6 @@ int __launchpad_pre_init(int argc, char **argv)
 		return -1;
 	}
 
-	__preload_init(argc, argv);
-
-	__preexec_init(argc, argv);
-
 	return fd;
 }
 
@@ -1256,9 +1253,6 @@ int __launchpad_post_init()
 		return 0;
 	}
 
-	if (__signal_set_sigchld() < 0)
-		return -1;
-
 	initialized++;
 
 	return 0;
@@ -1266,9 +1260,11 @@ int __launchpad_post_init()
 
 int main(int argc, char **argv)
 {
-	int main_fd;
+	int main_fd = -1;
+	int sigchld_fd = -1;
 	struct pollfd pfds[POLLFD_MAX];
-	int i;
+	struct signalfd_siginfo siginfo;
+	ssize_t s;
 
 	__adjust_process_capability(CAPABILITY_GET_ORIGINAL);
 
@@ -1279,26 +1275,53 @@ int main(int argc, char **argv)
 		exit(-1);
 	}
 
-	pfds[0].fd = main_fd;
-	pfds[0].events = POLLIN;
-	pfds[0].revents = 0;
+	pfds[LAUNCHPAD_FD].fd = main_fd;
+	pfds[LAUNCHPAD_FD].events = POLLIN;
+	pfds[LAUNCHPAD_FD].revents = 0;
+
+	sigchld_fd = __signal_get_sigchld_fd();
+	if (sigchld_fd == -1) {
+		_E("Failed to get sigchld fd");
+		goto error;
+	}
+
+	pfds[SIGCHLD_FD].fd = sigchld_fd;
+	pfds[SIGCHLD_FD].events = POLLIN;
+	pfds[SIGCHLD_FD].revents = 0;
 
 	while (1) {
 		if (poll(pfds, POLLFD_MAX, -1) < 0)
 			continue;
 
-		/* init with concerning X & EFL (because of booting 
-		sequence problem)*/
-		if (__launchpad_post_init() < 0) {
-			_E("launcpad post init failed");
-			exit(-1);
+		/* init with concerning X & EFL (because of booting sequence problem) */
+		__launchpad_post_init();
+
+		if ((pfds[SIGCHLD_FD].revents & POLLIN) != 0) {
+			do {
+				s = read(pfds[SIGCHLD_FD].fd, &siginfo, sizeof(struct signalfd_siginfo));
+				if (s == 0)
+					break;
+
+				if (s != sizeof(struct signalfd_siginfo)) {
+					_E("error reading sigchld info");
+					break;
+				}
+
+				__launchpad_process_sigchld(&siginfo);
+			} while (s > 0);
 		}
 
-		for (i = 0; i < POLLFD_MAX; i++) {
-			if ((pfds[i].revents & POLLIN) != 0) {
-				__launchpad_main_loop(pfds[i].fd);
-			}
+		if ((pfds[LAUNCHPAD_FD].revents & POLLIN) != 0) {
+			_D("pfds[LAUNCHPAD_FD].revents & POLLIN");
+			__launchpad_main_loop(pfds[LAUNCHPAD_FD].fd);
 		}
 	}
-}
 
+error:
+	if (main_fd != -1)
+		close(main_fd);
+	if (sigchld_fd != -1)
+		close(sigchld_fd);
+
+	return 0;
+}

@@ -28,9 +28,9 @@
 #include <dbus/dbus-glib-lowlevel.h>
 
 #define AUL_DBUS_PATH "/aul/dbus_handler"
-#define AUL_DBUS_SIGNAL_INTERFACE "com.samsung.aul.signal"
+#define AUL_DBUS_SIGNAL_INTERFACE "org.tizen.aul.signal"
 #define AUL_DBUS_APPDEAD_SIGNAL	"app_dead"
-#define AUL_DBUS_APPLAUNCH_SIGNAL	"app_launch"
+#define AUL_DBUS_APPLAUNCH_SIGNAL "app_launch"
 
 #define OPT_VALGRIND_LOGFILE		"--log-file="
 #define OPT_VALGRIND_LOGFILE_FIXED	"--log-file=/tmp/valgrind_result.txt"
